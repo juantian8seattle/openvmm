@@ -1257,6 +1257,8 @@ impl<'a> UhProtoPartition<'a> {
             hvdef::HypercallCode::HvCallGetVpIndexFromApicId,
             hvdef::HypercallCode::HvCallAcceptGpaPages,
             hvdef::HypercallCode::HvCallModifySparseGpaPageHostVisibility,
+            hvdef::HypercallCode::HvCallPinGpaPageRanges,
+            hvdef::HypercallCode::HvCallUnpinGpaPageRanges,
         ];
 
         if params.isolation.is_hardware_isolated() {

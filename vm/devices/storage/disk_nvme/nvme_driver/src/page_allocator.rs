@@ -12,6 +12,7 @@ use guestmem::GuestMemoryError;
 use inspect::Inspect;
 use parking_lot::Mutex;
 use std::sync::atomic::AtomicU8;
+use std::time::Duration;
 use user_driver::memory::MemoryBlock;
 use user_driver::memory::PAGE_SIZE;
 use user_driver::memory::PAGE_SIZE64;
@@ -63,7 +64,12 @@ impl PageAllocator {
                 // But we don't really have this use case right now, so this is OK.
                 self.event.listen()
             };
-            listener.await;
+
+            let mut ctx = mesh::CancelContext::new().with_timeout(Duration::from_secs(1));
+            if ctx.until_cancelled(listener).await.is_err() {
+                tracelimit::info_ratelimited!(n, "break on timeout...");
+                return None;
+            }
         };
 
         let pfns = self.mem.pfns();
@@ -97,6 +103,7 @@ impl PageAllocatorCore {
     }
 
     fn remaining(&self) -> usize {
+        //tracelimit::info_ratelimited!(len = self.free.len(), "remaining");
         self.free.len()
     }
 
@@ -190,6 +197,7 @@ impl Drop for ScopedPages<'_> {
                 core.free(page.page_index);
             }
         }
+        //tracelimit::info_ratelimited!(n, "drop notify ...");
         self.alloc.event.notify_additional(n);
     }
 }

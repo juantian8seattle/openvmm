@@ -161,7 +161,7 @@ impl QueuePair {
         });
 
         // caller ensure the bounce_buffer_pages
-        const MIN_PER_QUEUE_PAGES: usize = (128 * 1024 + PAGE_SIZE) / PAGE_SIZE;
+        const MIN_PER_QUEUE_PAGES: usize = (512 * 1024 + PAGE_SIZE) / PAGE_SIZE;
         let buffer_size_pages = std::cmp::max(bounce_buffer_pages as usize, MIN_PER_QUEUE_PAGES);
         let alloc = PageAllocator::new(
             device
@@ -170,7 +170,7 @@ impl QueuePair {
                 .context("failed to allocate pages for queue requests")?,
         );
 
-        tracing::info!(qid, "creating queue pair end");
+        tracing::info!(qid, buffer_size_pages, "creating queue pair end");
         Ok(Self {
             task,
             cancel,
@@ -304,13 +304,19 @@ impl Issuer {
             .map_err(RequestError::Memory)?;
 
         // TODO: add check if the memeory if VA-backed.
-        let is_va_backed = false;
+        let is_va_backed = true;
         let (prp, is_memory_pinned) = if !is_va_backed
             && mem
                 .gpns()
                 .iter()
                 .all(|&gpn| guest_memory.iova(gpn * PAGE_SIZE64).is_some())
         {
+            tracelimit::info_ratelimited!(
+                opcode = opcode.0,
+                size = mem.len(),
+                is_va_backed,
+                "issue io directly"
+            );
             // Guest memory is available to the device, so issue the IO directly.
             (
                 self.make_prp(
@@ -329,6 +335,12 @@ impl Issuer {
             let mut is_pinned = false;
             if let Some(io_threshold) = self.io_threshold {
                 if is_va_backed && self.partition.is_some() && mem.len() as u32 > io_threshold {
+                    tracelimit::info_ratelimited!(
+                        opcode = opcode.0,
+                        size = mem.len(),
+                        is_va_backed,
+                        "pin guest memory"
+                    );
                     self.partition
                         .as_ref()
                         .unwrap()
@@ -354,6 +366,7 @@ impl Issuer {
                         tracelimit::info_ratelimited!(
                             opcode = opcode.0,
                             size = mem.len(),
+                            is_va_backed,
                             "double buffering"
                         );
                         let double_buffer_pages = double_buffer_pages.insert(pages);
@@ -374,6 +387,12 @@ impl Issuer {
                     None => {
                         // Allocation failed. If guest memory is VA-backed, pin the memory. Otherwise return error.
                         if is_va_backed && self.partition.is_some() {
+                            tracelimit::info_ratelimited!(
+                                opcode = opcode.0,
+                                size = mem.len(),
+                                is_va_backed,
+                                "pin guest memory after allocation failed"
+                            );
                             self.partition
                                 .as_ref()
                                 .unwrap()
