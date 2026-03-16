@@ -1053,6 +1053,13 @@ async fn make_disk_type_from_physical_device(
                         )
                         .await
                     }
+                    underhill_config::DeviceType::VScsi if storage_context.use_storvsc_usermode => {
+                        // Usermode storvsc: route through StorvscDiskResolver
+                        return Ok(Resource::new(StorvscDiskConfig {
+                            instance_guid: controller_instance_id,
+                            lun: sub_device_path as u8,
+                        }));
+                    }
                     underhill_config::DeviceType::VScsi => {
                         get_vscsi_devname(
                             storage_context.uevent_listener,

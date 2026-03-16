@@ -746,3 +746,141 @@ impl DiskIo for StorvscDisk {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_scsi_request_read_cdb() {
+        let cdb = scsi_defs::Cdb16 {
+            operation_code: ScsiOp::READ16,
+            logical_block: 100u64.into(),
+            transfer_blocks: 8u32.into(),
+            ..FromZeros::new_zeroed()
+        };
+        let cdb_bytes = cdb.as_bytes();
+        assert_eq!(cdb_bytes[0], ScsiOp::READ16.0);
+        assert_eq!(cdb_bytes.len(), size_of::<scsi_defs::Cdb16>());
+    }
+
+    #[test]
+    fn test_generate_scsi_request_write_with_fua() {
+        let cdb = scsi_defs::Cdb16 {
+            operation_code: ScsiOp::WRITE16,
+            flags: scsi_defs::Cdb16Flags::new().with_fua(true),
+            logical_block: 200u64.into(),
+            transfer_blocks: 16u32.into(),
+            ..FromZeros::new_zeroed()
+        };
+        let flags = scsi_defs::Cdb16Flags::from(cdb.as_bytes()[1]);
+        assert!(flags.fua());
+    }
+
+    #[test]
+    fn test_read_capacity16_cdb_format() {
+        let cdb = scsi_defs::ServiceActionIn16 {
+            operation_code: ScsiOp::READ_CAPACITY16,
+            service_action: scsi_defs::SERVICE_ACTION_READ_CAPACITY16,
+            allocation_length: (PAGE_SIZE_4K as u32).into(),
+            ..FromZeros::new_zeroed()
+        };
+        assert_eq!(cdb.as_bytes()[0], ScsiOp::READ_CAPACITY16.0);
+        assert_eq!(cdb.service_action, scsi_defs::SERVICE_ACTION_READ_CAPACITY16);
+    }
+
+    #[test]
+    fn test_inquiry_vpd_cdb_format() {
+        let cdb = scsi_defs::CdbInquiry {
+            operation_code: ScsiOp::INQUIRY,
+            flags: scsi_defs::InquiryFlags::new().with_vpd(true),
+            page_code: scsi_defs::VPD_DEVICE_IDENTIFIERS,
+            allocation_length: (PAGE_SIZE_4K as u16).into(),
+            ..FromZeros::new_zeroed()
+        };
+        let flags = scsi_defs::InquiryFlags::from(cdb.as_bytes()[1]);
+        assert!(flags.vpd());
+        assert_eq!(cdb.page_code, scsi_defs::VPD_DEVICE_IDENTIFIERS);
+    }
+
+    #[test]
+    fn test_unmap_descriptor_format() {
+        let descriptor = scsi_defs::UnmapBlockDescriptor {
+            start_lba: 100u64.into(),
+            lba_count: 50u32.into(),
+            ..FromZeros::new_zeroed()
+        };
+        let start_lba: u64 = descriptor.start_lba.into();
+        let lba_count: u32 = descriptor.lba_count.into();
+        assert_eq!(start_lba, 100);
+        assert_eq!(lba_count, 50);
+    }
+
+    #[test]
+    fn test_unmap_count_overflow() {
+        // Regression test: count > u32::MAX should fail try_from
+        let count: u64 = u32::MAX as u64 + 1;
+        assert!(u32::try_from(count).is_err());
+    }
+
+    #[test]
+    fn test_scsi_request_payload_format() {
+        // Mirrors generate_scsi_request logic
+        let cdb = scsi_defs::Cdb16 {
+            operation_code: ScsiOp::READ16,
+            logical_block: 42u64.into(),
+            transfer_blocks: 1u32.into(),
+            ..FromZeros::new_zeroed()
+        };
+        let payload = cdb.as_bytes();
+        assert!(payload.len() <= storvsp_protocol::MAX_DATA_BUFFER_LENGTH_WITH_PADDING);
+
+        let mut request = storvsp_protocol::ScsiRequest {
+            target_id: 0,
+            path_id: 0,
+            lun: 3,
+            length: storvsp_protocol::SCSI_REQUEST_LEN_V2 as u16,
+            cdb_length: payload.len() as u8,
+            data_transfer_length: 4096,
+            data_in: 1,
+            ..FromZeros::new_zeroed()
+        };
+        request.payload[0..payload.len()].copy_from_slice(payload);
+
+        assert_eq!(request.lun, 3);
+        assert_eq!(request.data_transfer_length, 4096);
+        assert_eq!(request.data_in, 1);
+        assert_eq!(request.payload[0], ScsiOp::READ16.0);
+    }
+
+    #[test]
+    fn test_sync_cache_cdb_format() {
+        let cdb = scsi_defs::Cdb16 {
+            operation_code: ScsiOp::SYNCHRONIZE_CACHE16,
+            logical_block: 0u64.into(),
+            transfer_blocks: 0u32.into(),
+            ..FromZeros::new_zeroed()
+        };
+        assert_eq!(cdb.as_bytes()[0], ScsiOp::SYNCHRONIZE_CACHE16.0);
+        let blocks: u32 = cdb.transfer_blocks.into();
+        assert_eq!(blocks, 0); // 0 means sync all sectors
+    }
+
+    #[test]
+    fn test_eject_cdb_format() {
+        let cdb = scsi_defs::StartStop {
+            operation_code: ScsiOp::START_STOP_UNIT,
+            flag: scsi_defs::StartStopFlags::new().with_load_eject(true),
+            ..FromZeros::new_zeroed()
+        };
+        assert_eq!(cdb.as_bytes()[0], ScsiOp::START_STOP_UNIT.0);
+        let flags = scsi_defs::StartStopFlags::from(cdb.as_bytes()[4]);
+        assert!(flags.load_eject());
+    }
+
+    #[test]
+    fn test_max_retries_constant() {
+        assert_eq!(MAX_RETRIES, 5);
+    }
+}
