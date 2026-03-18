@@ -484,11 +484,7 @@ fn do_main() -> anyhow::Result<()> {
             // Crashdump
             "427b03e7-4ceb-4286-b5fc-486f4a1dd439",
         ),
-        (
-            "/sys/bus/vmbus/drivers/uio_hv_generic/new_id",
-            // SCSI (hv_storvsc replacement for usermode storvsc)
-            "ba6163d9-04a1-4d29-b605-72e2ffb1dc7f",
-        ),
+
         (
             "/proc/sys/kernel/core_pattern",
             if underhill_confidentiality::confidential_filtering_enabled() {
@@ -578,6 +574,22 @@ fn do_main() -> anyhow::Result<()> {
         )
         .context("failed to register nvme for vfio")?;
         log::info!("registered vfio-pci as driver for nvme");
+    }
+
+    if matches!(
+        std::env::var("OPENHCL_STORVSC_USERMODE").as_deref(),
+        Ok("true" | "1")
+    ) {
+        // Register UIO to bind to SCSI VMBus channels (hv_storvsc replacement).
+        //
+        // Since hv_storvsc is loaded as a module, and that happens after this
+        // call, this will take precedence over the in-kernel storvsc driver.
+        fs_err::write(
+            "/sys/bus/vmbus/drivers/uio_hv_generic/new_id",
+            "ba6163d9-04a1-4d29-b605-72e2ffb1dc7f",
+        )
+        .context("failed to register scsi for uio")?;
+        log::info!("registered uio_hv_generic as driver for scsi (storvsc usermode)");
     }
 
     // Start loading modules in parallel.
