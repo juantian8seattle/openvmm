@@ -351,7 +351,7 @@ fn init_logging() {
     }
 }
 
-fn load_modules(modules_path: &str) -> anyhow::Result<()> {
+fn load_modules(modules_path: &str, skip_modules: &[&str]) -> anyhow::Result<()> {
     // Get the kernel command line.
     let cmdline = fs_err::read_to_string("/proc/cmdline")?;
     let mut params = HashMap::new();
@@ -381,6 +381,11 @@ fn load_modules(modules_path: &str) -> anyhow::Result<()> {
             .replace('-', "_");
 
         let params = params.get_mut(&module_name);
+
+        if skip_modules.iter().any(|s| *s == module_name) {
+            log::info!("skipping kernel module {} (storvsc usermode)", module_name);
+            continue;
+        }
 
         log::info!(
             "loading kernel module {}: {}",
@@ -575,9 +580,34 @@ fn do_main() -> anyhow::Result<()> {
         log::info!("registered vfio-pci as driver for nvme");
     }
 
+    let storvsc_usermode = matches!(
+        std::env::var("OPENHCL_STORVSC_USERMODE").as_deref(),
+        Ok("true" | "1")
+    );
+    if storvsc_usermode {
+        // Register UIO to bind to SCSI VMBus channels (hv_storvsc replacement).
+        //
+        // Since hv_storvsc is loaded as a module, and that happens after this
+        // call, this will take precedence over the in-kernel storvsc driver.
+        fs_err::write(
+            "/sys/bus/vmbus/drivers/uio_hv_generic/new_id",
+            "ba6163d9-04a1-4d29-b605-72e2ffb1dc7f",
+        )
+        .context("failed to register scsi for uio")?;
+        log::info!("registered uio_hv_generic as driver for scsi (storvsc usermode)");
+    }
+
+    // Skip hv_storvsc.ko when usermode storvsc is enabled, otherwise the
+    // kernel driver races with UIO for SCSI VMBus channels.
+    let skip_modules: Vec<&str> = if storvsc_usermode {
+        vec!["hv_storvsc"]
+    } else {
+        vec![]
+    };
+
     // Start loading modules in parallel.
-    let thread = std::thread::spawn(|| {
-        if let Err(err) = load_modules("/lib/modules") {
+    let thread = std::thread::spawn(move || {
+        if let Err(err) = load_modules("/lib/modules", &skip_modules) {
             panic!("failed to load modules: {:#}", err);
         }
     });
