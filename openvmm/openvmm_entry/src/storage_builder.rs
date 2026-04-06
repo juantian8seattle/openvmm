@@ -175,6 +175,7 @@ impl StorageBuilder {
                 } else {
                     GuestMedia::Disk {
                         disk_type: disk,
+                        ide_direct_disk_type: None,
                         read_only,
                         disk_parameters: None,
                     }
