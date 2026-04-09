@@ -152,6 +152,68 @@ impl StorvscDisk {
 
         Ok(disk)
     }
+
+    /// Creates a StorvscDisk from saved metadata, skipping SCSI queries.
+    ///
+    /// Used on the servicing restore path where the host storvsp channel
+    /// may not be ready to process SCSI commands immediately. The metadata
+    /// was saved during the pre-servicing save and is known to be valid.
+    pub async fn new_with_metadata(
+        driver: Arc<StorvscDriver<MappedRingMem>>,
+        lun: u8,
+        use_bounce_buffer: bool,
+        metadata: StorvscDiskMetadata,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            metadata.sector_size != 0,
+            "saved metadata has sector_size=0"
+        );
+        let resize_event = Arc::new(event_listener::Event::new());
+        driver
+            .add_resize_listener(lun, resize_event.clone())
+            .context("failed to add resize listener to storvsc driver")?;
+        Ok(Self {
+            driver,
+            lun,
+            resize_event,
+            use_bounce_buffer,
+            sector_count: AtomicU64::new(metadata.sector_count),
+            sector_size: metadata.sector_size,
+            disk_id: metadata.disk_id,
+            read_only: metadata.read_only,
+            optimal_unmap_sectors: metadata.optimal_unmap_sectors,
+            device_type: metadata.device_type,
+        })
+    }
+
+    /// Returns the pre-fetched metadata for save/restore.
+    pub fn metadata(&self) -> StorvscDiskMetadata {
+        StorvscDiskMetadata {
+            sector_count: self.sector_count.load(Ordering::Relaxed),
+            sector_size: self.sector_size,
+            disk_id: self.disk_id,
+            read_only: self.read_only,
+            optimal_unmap_sectors: self.optimal_unmap_sectors,
+            device_type: self.device_type,
+        }
+    }
+}
+
+/// Pre-fetched disk metadata that can be saved and restored across servicing.
+#[derive(Debug, Clone)]
+pub struct StorvscDiskMetadata {
+    /// Total number of sectors on the device.
+    pub sector_count: u64,
+    /// Bytes per sector (typically 512 or 4096).
+    pub sector_size: u32,
+    /// VPD page 0x83 device identifier, if available.
+    pub disk_id: Option<[u8; 16]>,
+    /// Whether the device is read-only.
+    pub read_only: bool,
+    /// Optimal number of sectors per UNMAP descriptor.
+    pub optimal_unmap_sectors: u32,
+    /// SCSI peripheral device type (0x00=disk, 0x05=CD-ROM).
+    pub device_type: u8,
 }
 
 impl StorvscDisk {

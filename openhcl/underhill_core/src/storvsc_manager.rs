@@ -7,9 +7,14 @@
 //! Manages shared StorvscDriver instances (one per VMBus SCSI controller),
 //! following the same actor-based pattern as NvmeManager. Each driver is
 //! created on first use and shared across all disks (LUNs) on that controller.
+//!
+//! The manager also owns the per-LUN StorvscDisk cache. During servicing,
+//! it saves live disk metadata (read from AtomicU64 fields -- always fresh)
+//! and restores disks without SCSI queries on the restore path.
 
 use crate::servicing::StorvscSavedState;
 use crate::storvsc_manager::save_restore::StorvscManagerSavedState;
+use crate::storvsc_manager::save_restore::StorvscSavedDiskMetadata;
 use crate::storvsc_manager::save_restore::StorvscSavedDriverConfig;
 use anyhow::Context;
 use async_trait::async_trait;
@@ -28,12 +33,10 @@ use openhcl_dma_manager::DmaClientSpawner;
 use openhcl_dma_manager::LowerVtlPermissionPolicy;
 use pal_async::task::Spawn;
 use pal_async::task::Task;
-use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::collections::hash_map;
 use std::sync::Arc;
 use storvsc_driver::StorvscDriver;
-use thiserror::Error;
 use tracing::Instrument;
 use vm_resource::AsyncResolveResource;
 use vm_resource::ResourceId;
@@ -45,15 +48,7 @@ use vmcore::vm_task::VmTaskDriverSource;
 const STORVSC_IN_RING_SIZE: usize = 0x1ff000;
 const STORVSC_OUT_RING_SIZE: usize = 0x1ff000;
 
-#[derive(Debug, Error)]
-#[error("storvsc driver {instance_guid} error")]
-pub struct DriverError {
-    instance_guid: guid::Guid,
-    #[source]
-    source: InnerError,
-}
-
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 enum InnerError {
     #[error("failed to initialize vmbus channel")]
     Vmbus(#[source] vmbus_user_channel::Error),
@@ -93,6 +88,8 @@ impl StorvscManager {
         let mut worker = StorvscManagerWorker {
             driver_source: driver_source.clone(),
             drivers: HashMap::new(),
+            disks: HashMap::new(),
+            saved_disk_metadata: HashMap::new(),
             save_restore_supported,
             is_isolated,
             dma_client_spawner,
@@ -155,7 +152,7 @@ impl StorvscManager {
 
 enum Request {
     Inspect(inspect::Deferred),
-    GetDriver(Rpc<guid::Guid, Result<Arc<StorvscDriver<MappedRingMem>>, DriverError>>),
+    GetOrCreateDisk(Rpc<(guid::Guid, u8), Result<Arc<disk_storvsc::StorvscDisk>, anyhow::Error>>),
     Save(Rpc<(), Result<StorvscManagerSavedState, anyhow::Error>>),
     Shutdown { span: tracing::Span },
 }
@@ -166,19 +163,15 @@ pub struct StorvscManagerClient {
 }
 
 impl StorvscManagerClient {
-    pub async fn get_driver(
+    pub async fn get_or_create_disk(
         &self,
         instance_guid: guid::Guid,
-    ) -> anyhow::Result<Arc<StorvscDriver<MappedRingMem>>> {
-        Ok(self
-            .sender
-            .call(Request::GetDriver, instance_guid)
-            .instrument(tracing::info_span!(
-                "storvsc_get_driver",
-                instance_guid = instance_guid.to_string()
-            ))
+        lun: u8,
+    ) -> anyhow::Result<Arc<disk_storvsc::StorvscDisk>> {
+        self.sender
+            .call(Request::GetOrCreateDisk, (instance_guid, lun))
             .await
-            .context("storvsc manager is shutdown")??)
+            .context("storvsc manager is shutdown")?
     }
 
     pub async fn save(&self) -> Option<StorvscManagerSavedState> {
@@ -195,6 +188,15 @@ struct StorvscManagerWorker {
     driver_source: VmTaskDriverSource,
     #[inspect(iter_by_key)]
     drivers: HashMap<guid::Guid, Arc<StorvscDriver<MappedRingMem>>>,
+    /// Cached StorvscDisk instances, keyed by (controller_guid, lun).
+    /// Both StorvscDiskConfig and StorvscDiskBounceConfig resolvers share
+    /// the same underlying disk via this cache.
+    #[inspect(skip)]
+    disks: HashMap<(guid::Guid, u8), Arc<disk_storvsc::StorvscDisk>>,
+    /// Saved metadata from pre-servicing save. Populated during restore,
+    /// consumed lazily when disks are first resolved after servicing.
+    #[inspect(skip)]
+    saved_disk_metadata: HashMap<(guid::Guid, u8), disk_storvsc::StorvscDiskMetadata>,
     /// Running environment (memory layout) allows save/restore.
     save_restore_supported: bool,
     /// If this VM is isolated or not. This influences DMA client allocations.
@@ -211,16 +213,9 @@ impl StorvscManagerWorker {
             };
             match req {
                 Request::Inspect(deferred) => deferred.inspect(&self),
-                Request::GetDriver(rpc) => {
-                    rpc.handle(async |instance_guid| {
-                        self.get_driver(instance_guid)
-                            .map_err(|source| DriverError {
-                                instance_guid,
-                                source,
-                            })
-                            .await
-                    })
-                    .await
+                Request::GetOrCreateDisk(rpc) => {
+                    rpc.handle(async |(guid, lun)| self.get_or_create_disk(guid, lun).await)
+                        .await
                 }
                 Request::Save(rpc) => {
                     rpc.handle(async |_| self.save().await)
@@ -316,12 +311,69 @@ impl StorvscManagerWorker {
         Ok(storvsc)
     }
 
-    /// Saves storvsc driver states into buffer during servicing.
+    /// Gets or creates a StorvscDisk for the given controller + LUN.
+    /// On the restore path, uses saved metadata to avoid SCSI queries.
+    async fn get_or_create_disk(
+        &mut self,
+        instance_guid: guid::Guid,
+        lun: u8,
+    ) -> anyhow::Result<Arc<disk_storvsc::StorvscDisk>> {
+        let key = (instance_guid, lun);
+        if let Some(disk) = self.disks.get(&key) {
+            return Ok(disk.clone());
+        }
+
+        let driver = self
+            .get_driver(instance_guid)
+            .await
+            .map_err(anyhow::Error::new)?;
+
+        let disk = if let Some(meta) = self.saved_disk_metadata.remove(&key) {
+            tracing::info!(
+                %instance_guid,
+                lun,
+                sector_size = meta.sector_size,
+                sector_count = meta.sector_count,
+                "restoring StorvscDisk from saved metadata (skip SCSI queries)"
+            );
+            disk_storvsc::StorvscDisk::new_with_metadata(driver, lun, self.is_isolated, meta)
+                .await
+                .context("failed to restore StorvscDisk from metadata")?
+        } else {
+            disk_storvsc::StorvscDisk::new(driver, lun, self.is_isolated)
+                .await
+                .context("failed to create StorvscDisk")?
+        };
+
+        let disk = Arc::new(disk);
+        self.disks.insert(key, disk.clone());
+        Ok(disk)
+    }
+
+    /// Saves storvsc driver states and live disk metadata during servicing.
+    /// Disk metadata is read from live AtomicU64 fields -- always fresh,
+    /// no stale data risk even after runtime resizes.
     pub async fn save(&mut self) -> anyhow::Result<StorvscManagerSavedState> {
         let mut storvsc_drivers: Vec<StorvscSavedDriverConfig> = Vec::new();
         for (guid, driver) in self.drivers.iter_mut() {
+            let mut disk_metadata = Vec::new();
+            for (&(g, lun), disk) in &self.disks {
+                if g == *guid {
+                    let meta = disk.metadata();
+                    disk_metadata.push(StorvscSavedDiskMetadata {
+                        lun: lun as u32,
+                        sector_count: meta.sector_count,
+                        sector_size: meta.sector_size,
+                        disk_id: meta.disk_id.map(|d| d.to_vec()).unwrap_or_default(),
+                        read_only: meta.read_only,
+                        optimal_unmap_sectors: meta.optimal_unmap_sectors,
+                        device_type: meta.device_type as u32,
+                    });
+                }
+            }
             storvsc_drivers.push(StorvscSavedDriverConfig {
                 instance_guid: *guid,
+                disk_metadata,
                 driver_state: driver
                     .save()
                     .instrument(tracing::info_span!(
@@ -336,7 +388,8 @@ impl StorvscManagerWorker {
     }
 
     /// Restores storvsc manager and driver states from the buffer after
-    /// servicing.
+    /// servicing. Disk metadata is saved for lazy consumption when disks
+    /// are resolved via get_or_create_disk().
     pub async fn restore(&mut self, saved_state: &StorvscManagerSavedState) -> anyhow::Result<()> {
         self.drivers = HashMap::new();
         for driver_state in &saved_state.storvsc_drivers {
@@ -380,38 +433,41 @@ impl StorvscManagerWorker {
                     .await?,
                 ), // TODO: Pick right VP
             );
+
+            // Populate saved disk metadata for lazy restore via get_or_create_disk().
+            for disk_meta in &driver_state.disk_metadata {
+                self.saved_disk_metadata.insert(
+                    (driver_state.instance_guid, disk_meta.lun as u8),
+                    disk_storvsc::StorvscDiskMetadata {
+                        sector_count: disk_meta.sector_count,
+                        sector_size: disk_meta.sector_size,
+                        disk_id: if disk_meta.disk_id.len() == 16 {
+                            Some(disk_meta.disk_id.as_slice().try_into().unwrap())
+                        } else {
+                            None
+                        },
+                        read_only: disk_meta.read_only,
+                        optimal_unmap_sectors: disk_meta.optimal_unmap_sectors,
+                        device_type: disk_meta.device_type as u8,
+                    },
+                );
+            }
         }
         Ok(())
     }
 }
 
+/// Stateless resolver that asks the manager for disk instances.
+/// The manager owns both the driver and disk caches, handling
+/// save/restore internally.
+#[derive(Clone)]
 pub struct StorvscDiskResolver {
     manager: StorvscManagerClient,
-    is_isolated: bool,
-    /// Cache of StorvscDisk instances keyed by (controller_guid, lun).
-    /// Shared between StorvscDiskConfig and StorvscDiskBounceConfig resolvers
-    /// so both IDE-direct (bounce) and IDE-accel (GPA-direct) paths share
-    /// the same underlying disk (same metadata, resize listeners, etc.).
-    disk_cache: Arc<Mutex<HashMap<(guid::Guid, u8), Arc<disk_storvsc::StorvscDisk>>>>,
-}
-
-impl Clone for StorvscDiskResolver {
-    fn clone(&self) -> Self {
-        Self {
-            manager: self.manager.clone(),
-            is_isolated: self.is_isolated,
-            disk_cache: self.disk_cache.clone(),
-        }
-    }
 }
 
 impl StorvscDiskResolver {
-    pub fn new(manager: StorvscManagerClient, is_isolated: bool) -> Self {
-        Self {
-            manager,
-            is_isolated,
-            disk_cache: Arc::new(Mutex::new(HashMap::new())),
-        }
+    pub fn new(manager: StorvscManagerClient) -> Self {
+        Self { manager }
     }
 }
 
@@ -426,33 +482,11 @@ impl AsyncResolveResource<DiskHandleKind, StorvscDiskConfig> for StorvscDiskReso
         rsrc: StorvscDiskConfig,
         _input: ResolveDiskParameters<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let key = (rsrc.instance_guid, rsrc.lun);
-
-        // Check cache first (bounce resolver may have already created it).
-        {
-            let cache = self.disk_cache.lock();
-            if let Some(disk) = cache.get(&key) {
-                return ResolvedDisk::new(disk_storvsc::StorvscDiskBounce::new(
-                    disk.clone(),
-                    false,
-                ))
-                .context("invalid disk");
-            }
-        }
-
-        let driver = self
+        let disk = self
             .manager
-            .get_driver(rsrc.instance_guid)
+            .get_or_create_disk(rsrc.instance_guid, rsrc.lun)
             .await
             .context("could not open storvsc disk")?;
-
-        let disk = Arc::new(
-            disk_storvsc::StorvscDisk::new(driver, rsrc.lun, self.is_isolated)
-                .await
-                .context("failed to create StorvscDisk")?,
-        );
-
-        self.disk_cache.lock().insert(key, disk.clone());
 
         ResolvedDisk::new(disk_storvsc::StorvscDiskBounce::new(disk, false)).context("invalid disk")
     }
@@ -492,36 +526,13 @@ impl AsyncResolveResource<DiskHandleKind, StorvscDiskBounceConfig> for StorvscDi
         rsrc: StorvscDiskBounceConfig,
         _input: ResolveDiskParameters<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let key = (rsrc.instance_guid, rsrc.lun);
+        let disk = self
+            .manager
+            .get_or_create_disk(rsrc.instance_guid, rsrc.lun)
+            .await
+            .context("could not open storvsc disk for bounce")?;
 
-        // Check cache first (GPA-direct resolver may have already created the disk).
-        let inner = {
-            let cache = self.disk_cache.lock();
-            cache.get(&key).cloned()
-        };
-
-        let inner = match inner {
-            Some(disk) => disk,
-            None => {
-                // Cache miss: create the disk and cache it.
-                let driver = self
-                    .manager
-                    .get_driver(rsrc.instance_guid)
-                    .await
-                    .context("could not open storvsc disk for bounce")?;
-
-                let disk = Arc::new(
-                    disk_storvsc::StorvscDisk::new(driver, rsrc.lun, self.is_isolated)
-                        .await
-                        .context("failed to create StorvscDisk for bounce")?,
-                );
-
-                self.disk_cache.lock().insert(key, disk.clone());
-                disk
-            }
-        };
-
-        ResolvedDisk::new(disk_storvsc::StorvscDiskBounce::new(inner, true))
+        ResolvedDisk::new(disk_storvsc::StorvscDiskBounce::new(disk, true))
             .context("invalid bounce disk")
     }
 }
@@ -544,6 +555,29 @@ pub mod save_restore {
         pub instance_guid: guid::Guid,
         #[mesh(2)]
         pub driver_state: storvsc_driver::save_restore::StorvscDriverSavedState,
+        #[mesh(3)]
+        pub disk_metadata: Vec<StorvscSavedDiskMetadata>,
+    }
+
+    /// Per-LUN disk metadata saved across servicing to avoid re-querying
+    /// capacity via SCSI commands on restore.
+    #[derive(Protobuf, Clone)]
+    #[mesh(package = "underhill")]
+    pub struct StorvscSavedDiskMetadata {
+        #[mesh(1)]
+        pub lun: u32,
+        #[mesh(2)]
+        pub sector_count: u64,
+        #[mesh(3)]
+        pub sector_size: u32,
+        #[mesh(4)]
+        pub disk_id: Vec<u8>,
+        #[mesh(5)]
+        pub read_only: bool,
+        #[mesh(6)]
+        pub optimal_unmap_sectors: u32,
+        #[mesh(7)]
+        pub device_type: u32,
     }
 }
 

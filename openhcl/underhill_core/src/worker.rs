@@ -2293,8 +2293,7 @@ async fn new_underhill_vm(
             save_restore_supported,
             "StorVSC usermode manager initialized, setting up resolver"
         );
-        let storvsc_resolver =
-            StorvscDiskResolver::new(manager.client().clone(), isolation.is_isolated());
+        let storvsc_resolver = StorvscDiskResolver::new(manager.client().clone());
         resolver.add_async_resolver::<DiskHandleKind, _, StorvscDiskConfig, _>(
             storvsc_resolver.clone(),
         );
