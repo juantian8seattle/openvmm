@@ -5,7 +5,9 @@
 
 use super::LoadedVm;
 use crate::nvme_manager::manager::NvmeDiskConfig;
+#[cfg(feature = "storvsc-usermode")]
 use crate::storvsc_manager::StorvscDiskBounceConfig;
+#[cfg(feature = "storvsc-usermode")]
 use crate::storvsc_manager::StorvscDiskConfig;
 use crate::worker::NicConfig;
 use anyhow::Context;
@@ -1029,6 +1031,9 @@ async fn make_disk_type_from_physical_device(
 
     // If storvsc usermode is enabled, route VScsi devices through StorvscDiskResolver
     // instead of the kernel path. Early return -- no need to wait for kernel device.
+    // storvsc_usermode field is always present but only actionable with feature.
+    let _ = storage_context.use_storvsc_usermode;
+    #[cfg(feature = "storvsc-usermode")]
     if storage_context.use_storvsc_usermode
         && matches!(
             single_device.device_type,
@@ -1242,6 +1247,7 @@ async fn make_ide_disk_config(
         // VScsi controller, the IDE direct (port I/O) path needs a bounce
         // wrapper because IDE CommandBuffer uses fake GPNs. The IDE accel
         // (storvsp VMBus) path gets the normal GPA-direct disk.
+        #[cfg(feature = "storvsc-usermode")]
         let ide_direct = if storage_context.use_storvsc_usermode {
             match &disk.physical_devices {
                 PhysicalDevices::Single { device }
@@ -1260,6 +1266,8 @@ async fn make_ide_disk_config(
         } else {
             None
         };
+        #[cfg(not(feature = "storvsc-usermode"))]
+        let ide_direct: Option<Resource<DiskHandleKind>> = None;
 
         Ok((
             IdeDeviceConfig {

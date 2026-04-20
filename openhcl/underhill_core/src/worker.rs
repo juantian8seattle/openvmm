@@ -54,9 +54,13 @@ use crate::reference_time::ReferenceTime;
 use crate::servicing;
 use crate::servicing::ServicingState;
 use crate::servicing::transposed::OptionServicingInitState;
+#[cfg(feature = "storvsc-usermode")]
 use crate::storvsc_manager::StorvscDiskBounceConfig;
+#[cfg(feature = "storvsc-usermode")]
 use crate::storvsc_manager::StorvscDiskConfig;
+#[cfg(feature = "storvsc-usermode")]
 use crate::storvsc_manager::StorvscDiskResolver;
+#[cfg(feature = "storvsc-usermode")]
 use crate::storvsc_manager::StorvscManager;
 use crate::threadpool_vm_task_backend::ThreadpoolBackend;
 use crate::vmbus_relay_unit::VmbusRelayHandle;
@@ -2285,6 +2289,7 @@ async fn new_underhill_vm(
     };
 
     // Create the usermode StorVSC manager if enabled.
+    #[cfg(feature = "storvsc-usermode")]
     let storvsc_manager = if env_cfg.storvsc_usermode {
         let save_restore_supported = !runtime_params.private_pool_ranges().is_empty();
         let manager = StorvscManager::new(
@@ -2313,6 +2318,9 @@ async fn new_underhill_vm(
     } else {
         None
     };
+
+    #[cfg(not(feature = "storvsc-usermode"))]
+    let _storvsc_manager: Option<()> = None;
 
     let initial_generation_id = match dps.general.generation_id.map(u128::from_ne_bytes) {
         Some(0) | None => {
@@ -3672,6 +3680,7 @@ async fn new_underhill_vm(
         uevent_listener,
         resolver,
         nvme_manager,
+        #[cfg(feature = "storvsc-usermode")]
         storvsc_manager,
         emuplat_servicing: EmuplatServicing {
             get_backed_adjust_gpa_range: emuplat_adjust_gpa_range,

@@ -99,6 +99,7 @@ impl OpenhclIgvmRecipe {
             let mut m = BTreeSet::new();
 
             m.insert(OpenvmmHclFeature::Tpm);
+            m.insert(OpenvmmHclFeature::StorvscUsermode);
 
             if !release_cfg {
                 m.insert(OpenvmmHclFeature::Gdb);
