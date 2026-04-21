@@ -101,7 +101,6 @@ impl OpenhclIgvmRecipe {
             let mut m = BTreeSet::new();
 
             m.insert(OpenvmmHclFeature::Tpm);
-            m.insert(OpenvmmHclFeature::StorvscUsermode);
 
             if !release_cfg {
                 m.insert(OpenvmmHclFeature::Gdb);
@@ -177,7 +176,11 @@ impl OpenhclIgvmRecipe {
                     "openhcl-x64-direct-release.json",
                 ),
                 openhcl_kernel_package: OpenhclKernelPackage::Main,
-                openvmm_hcl_features: base_openvmm_hcl_features(),
+                openvmm_hcl_features: {
+                    let mut f = base_openvmm_hcl_features();
+                    f.insert(OpenvmmHclFeature::StorvscUsermode);
+                    f
+                },
                 target: CommonTriple::X86_64_LINUX_MUSL,
                 vtl0_kernel_type: Some(Vtl0KernelType::Example),
                 with_uefi: false,
@@ -192,7 +195,11 @@ impl OpenhclIgvmRecipe {
                     "openhcl-x64-direct-release.json",
                 ),
                 openhcl_kernel_package: OpenhclKernelPackage::Dev,
-                openvmm_hcl_features: base_openvmm_hcl_features(),
+                openvmm_hcl_features: {
+                    let mut f = base_openvmm_hcl_features();
+                    f.insert(OpenvmmHclFeature::StorvscUsermode);
+                    f
+                },
                 target: CommonTriple::X86_64_LINUX_MUSL,
                 vtl0_kernel_type: Some(Vtl0KernelType::Example),
                 with_uefi: false,
