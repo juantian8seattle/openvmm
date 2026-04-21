@@ -116,7 +116,7 @@ async fn basic_servicing<T: PetriVmmBackend>(
 /// Test servicing with the storvsc usermode driver.
 #[vmm_test(
     openvmm_openhcl_linux_direct_x64 [LATEST_LINUX_DIRECT_TEST_X64],
-    hyperv_openhcl_pcat_x64(vhd(ubuntu_2504_server_x64))[LATEST_STANDARD_X64],
+    hyperv_openhcl_pcat_x64(vhd(ubuntu_2504_server_x64))[LATEST_STORVSC_USERMODE_X64],
 )]
 async fn storvsc_usermode_servicing<T: PetriVmmBackend>(
     config: PetriVmBuilder<T>,

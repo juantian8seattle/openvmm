@@ -636,7 +636,7 @@ async fn vhost_user_blk_device(
 /// Boot with the storvsc usermode driver.
 #[vmm_test(
     openvmm_openhcl_linux_direct_x64,
-    hyperv_openhcl_pcat_x64(vhd(ubuntu_2504_server_x64))
+    hyperv_openhcl_pcat_x64(vhd(ubuntu_2504_server_x64))[LATEST_STORVSC_USERMODE_X64]
 )]
 async fn storvsc_usermode_boot<T: PetriVmmBackend>(
     config: PetriVmBuilder<T>,

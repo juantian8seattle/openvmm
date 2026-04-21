@@ -87,6 +87,8 @@ pub enum OpenhclIgvmRecipe {
     X64Devkern,
     X64TestLinuxDirect,
     X64TestLinuxDirectDevkern,
+    /// X64 OpenHCL, with storvsc usermode feature.
+    X64StorvscUsermode,
     X64Cvm,
     X64CvmDevkern,
     Aarch64,
@@ -194,6 +196,22 @@ impl OpenhclIgvmRecipe {
                 target: CommonTriple::X86_64_LINUX_MUSL,
                 vtl0_kernel_type: Some(Vtl0KernelType::Example),
                 with_uefi: false,
+                with_interactive,
+                with_sidecar: true,
+                max_trace_level,
+            },
+            Self::X64StorvscUsermode => OpenhclIgvmRecipeDetails {
+                local_only: None,
+                igvm_manifest: in_repo_template("openhcl-x64-dev.json", "openhcl-x64-release.json"),
+                openhcl_kernel_package: OpenhclKernelPackage::Main,
+                openvmm_hcl_features: {
+                    let mut f = base_openvmm_hcl_features();
+                    f.insert(OpenvmmHclFeature::StorvscUsermode);
+                    f
+                },
+                target: CommonTriple::X86_64_LINUX_MUSL,
+                vtl0_kernel_type: None,
+                with_uefi: true,
                 with_interactive,
                 with_sidecar: true,
                 max_trace_level,
