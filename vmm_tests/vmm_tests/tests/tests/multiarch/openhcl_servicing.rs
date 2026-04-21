@@ -6,6 +6,7 @@
 //! For x86-64, it is supported using both Hyper-V and OpenVMM.
 //! For aarch64, it is supported using Hyper-V.
 
+use petri_artifacts_vmm_test::artifacts::openhcl_igvm::LATEST_STORVSC_USERMODE_X64;
 use crate::utils::ExpectedGuestDevice;
 use crate::utils::get_device_paths;
 use disk_backend_resources::LayeredDiskHandle;

@@ -3,6 +3,7 @@
 
 //! Integration tests that run on more than one architecture.
 
+use petri_artifacts_vmm_test::artifacts::openhcl_igvm::LATEST_STORVSC_USERMODE_X64;
 use anyhow::Context;
 use futures::StreamExt;
 use petri::MemoryConfig;
